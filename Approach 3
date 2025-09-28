@@ -1,0 +1,383 @@
+Solution Overview
+We'll use:
+
+Custom Events for child → parent communication (form validity)
+
+Method binding for parent → child communication (data retrieval)
+
+Shared Service to manage subscriptions and state
+
+Implementation
+1. Shared Service (Event Bridge)
+typescript
+// form-bridge.service.ts
+import { Injectable, OnDestroy } from '@angular/core';
+import { Subject, Observable } from 'rxjs';
+
+@Injectable({
+  providedIn: 'root'
+})
+export class FormBridgeService implements OnDestroy {
+  private formValiditySubject = new Subject<boolean>();
+  private dataRequestSubject = new Subject<string>();
+  private dataResponseSubject = new Subject<any>();
+
+  // Child web component calls this to update form validity
+  updateFormValidity(isValid: boolean): void {
+    this.formValiditySubject.next(isValid);
+  }
+
+  // Parent listens to form validity changes
+  get formValidity$(): Observable<boolean> {
+    return this.formValiditySubject.asObservable();
+  }
+
+  // Parent requests form data
+  requestFormData(componentId: string): void {
+    this.dataRequestSubject.next(componentId);
+  }
+
+  // Parent listens for form data responses
+  get dataResponse$(): Observable<any> {
+    return this.dataResponseSubject.asObservable();
+  }
+
+  // Child web component sends form data
+  sendFormData(data: any): void {
+    this.dataResponseSubject.next(data);
+  }
+
+  ngOnDestroy(): void {
+    this.formValiditySubject.complete();
+    this.dataRequestSubject.complete();
+    this.dataResponseSubject.complete();
+  }
+}
+2. Web Component Implementation
+typescript
+// form-web-component.ts
+export class FormWebComponent extends HTMLElement {
+  private formData: any = {};
+  private isValid = false;
+  private bridgeService: any; // Reference to the service
+
+  constructor() {
+    super();
+    this.initializeForm();
+  }
+
+  connectedCallback() {
+    this.setupEventListeners();
+    this.initializeBridgeService();
+  }
+
+  disconnectedCallback() {
+    this.cleanup();
+  }
+
+  private initializeBridgeService() {
+    // Access the Angular service via window object
+    this.bridgeService = (window as any).ngFormBridgeService;
+    
+    if (!this.bridgeService) {
+      console.warn('FormBridgeService not found');
+      return;
+    }
+
+    // Listen for data requests from parent
+    this.bridgeService.dataRequestSubject?.subscribe((componentId: string) => {
+      if (componentId === this.id) {
+        this.bridgeService.sendFormData(this.formData);
+      }
+    });
+  }
+
+  private setupEventListeners() {
+    this.addEventListener('input', this.handleFormChange.bind(this));
+  }
+
+  private handleFormChange(event: Event) {
+    const target = event.target as HTMLInputElement;
+    
+    if (target.name) {
+      this.formData[target.name] = target.value;
+      this.validateForm();
+      this.updateParent();
+    }
+  }
+
+  private validateForm() {
+    // Your form validation logic
+    this.isValid = Object.keys(this.formData).length > 0 && 
+                   Object.values(this.formData).every(value => value && value.toString().trim() !== '');
+  }
+
+  private updateParent() {
+    if (this.bridgeService) {
+      this.bridgeService.updateFormValidity(this.isValid);
+    }
+  }
+
+  // Public method to get form data (called by parent)
+  getFormData() {
+    return this.formData;
+  }
+
+  private cleanup() {
+    this.bridgeService?.updateFormValidity(false);
+  }
+}
+
+// Register web component
+customElements.define('form-web-component', FormWebComponent);
+3. Angular Parent Component
+typescript
+// parent.component.ts
+import { Component, OnInit, OnDestroy, ViewChild, ElementRef, AfterViewInit } from '@angular/core';
+import { FormBridgeService } from './form-bridge.service';
+import { Subscription, takeUntil, Subject } from 'rxjs';
+
+@Component({
+  selector: 'app-parent',
+  template: `
+    <div>
+      <button 
+        [disabled]="!isFormValid" 
+        (click)="handleSubmit()"
+        class="submit-btn">
+        Submit
+      </button>
+      
+      <div #webComponentContainer></div>
+    </div>
+  `
+})
+export class ParentComponent implements OnInit, AfterViewInit, OnDestroy {
+  @ViewChild('webComponentContainer', { static: false }) 
+  webComponentContainer!: ElementRef;
+
+  isFormValid = false;
+  private destroy$ = new Subject<void>();
+  private formValiditySubscription?: Subscription;
+  private dataResponseSubscription?: Subscription;
+  private webComponentInstance: any;
+
+  constructor(private formBridge: FormBridgeService) {}
+
+  ngOnInit() {
+    // Expose service to web components (for runtime access)
+    (window as any).ngFormBridgeService = this.formBridge;
+
+    this.setupSubscriptions();
+  }
+
+  ngAfterViewInit() {
+    this.loadWebComponent();
+  }
+
+  private setupSubscriptions() {
+    // Subscribe to form validity changes
+    this.formValiditySubscription = this.formBridge.formValidity$
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(isValid => {
+        this.isFormValid = isValid;
+      });
+
+    // Subscribe to form data responses
+    this.dataResponseSubscription = this.formBridge.dataResponse$
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(data => {
+        if (data) {
+          this.processFormData(data);
+        }
+      });
+  }
+
+  private loadWebComponent() {
+    // Dynamically create and load web component
+    const webComponent = document.createElement('form-web-component');
+    webComponent.id = 'dynamic-form-1';
+    
+    this.webComponentContainer.nativeElement.appendChild(webComponent);
+    this.webComponentInstance = webComponent;
+  }
+
+  handleSubmit() {
+    if (this.isFormValid) {
+      // Request form data from web component
+      this.formBridge.requestFormData('dynamic-form-1');
+    }
+  }
+
+  private processFormData(formData: any) {
+    // Send to your Angular service for processing
+    console.log('Form data received:', formData);
+    
+    // Your service call here
+    // this.yourService.processData(formData).subscribe(...);
+  }
+
+  // Alternative approach: Direct method call (if web component supports it)
+  private async getFormDataDirectly() {
+    if (this.webComponentInstance && this.webComponentInstance.getFormData) {
+      const formData = this.webComponentInstance.getFormData();
+      this.processFormData(formData);
+    }
+  }
+
+  ngOnDestroy() {
+    this.destroy$.next();
+    this.destroy$.complete();
+
+    // Clean up global reference
+    delete (window as any).ngFormBridgeService;
+
+    // Remove web component
+    if (this.webComponentContainer?.nativeElement) {
+      this.webComponentContainer.nativeElement.innerHTML = '';
+    }
+  }
+}
+4. Enhanced Web Component with Better Event Handling
+typescript
+// enhanced-form-web-component.ts
+export class EnhancedFormWebComponent extends HTMLElement {
+  private formData: any = {};
+  private isValid = false;
+  private bridgeService: any;
+  private dataRequestSubscription: any;
+
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this.render();
+  }
+
+  connectedCallback() {
+    this.setupEventListeners();
+    this.initializeBridgeService();
+  }
+
+  disconnectedCallback() {
+    this.cleanup();
+  }
+
+  private render() {
+    if (this.shadowRoot) {
+      this.shadowRoot.innerHTML = `
+        <form>
+          <input type="text" name="username" placeholder="Username" required>
+          <input type="email" name="email" placeholder="Email" required>
+          <input type="file" name="file" accept=".pdf,.doc,.docx">
+        </form>
+        <style>
+          input {
+            display: block;
+            margin: 10px 0;
+            padding: 8px;
+            width: 100%;
+            box-sizing: border-box;
+          }
+        </style>
+      `;
+    }
+  }
+
+  private initializeBridgeService() {
+    this.bridgeService = (window as any).ngFormBridgeService;
+    
+    if (this.bridgeService?.dataRequestSubject) {
+      this.dataRequestSubscription = this.bridgeService.dataRequestSubject.subscribe(
+        (componentId: string) => {
+          if (componentId === this.id) {
+            this.bridgeService.sendFormData(this.getFormData());
+          }
+        }
+      );
+    }
+  }
+
+  private setupEventListeners() {
+    if (this.shadowRoot) {
+      const inputs = this.shadowRoot.querySelectorAll('input');
+      inputs.forEach(input => {
+        input.addEventListener('input', this.handleInputChange.bind(this));
+        input.addEventListener('change', this.handleInputChange.bind(this));
+      });
+    }
+  }
+
+  private handleInputChange(event: Event) {
+    const target = event.target as HTMLInputElement;
+    
+    if (target.name) {
+      if (target.type === 'file') {
+        this.formData[target.name] = target.files?.[0] || null;
+      } else {
+        this.formData[target.name] = target.value;
+      }
+      
+      this.validateForm();
+      this.updateParent();
+    }
+  }
+
+  private validateForm() {
+    // Enhanced validation logic
+    this.isValid = this.formData.username && 
+                   this.formData.email && 
+                   this.validateEmail(this.formData.email) &&
+                   this.formData.file;
+  }
+
+  private validateEmail(email: string): boolean {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
+  }
+
+  private updateParent() {
+    if (this.bridgeService) {
+      this.bridgeService.updateFormValidity(this.isValid);
+    }
+  }
+
+  getFormData() {
+    return { ...this.formData };
+  }
+
+  private cleanup() {
+    if (this.dataRequestSubscription) {
+      this.dataRequestSubscription.unsubscribe();
+    }
+    this.bridgeService?.updateFormValidity(false);
+  }
+}
+
+customElements.define('enhanced-form-web-component', EnhancedFormWebComponent);
+Key Optimizations
+Automatic Cleanup: Using takeUntil pattern for RxJS subscriptions
+
+Centralized Service: Single service manages all communication
+
+Component ID System: Supports multiple web components
+
+Memory Management: Proper cleanup in ngOnDestroy and disconnectedCallback
+
+Lazy Loading Ready: Works with dynamically loaded web components
+
+Usage Pattern
+typescript
+// When loading multiple web components dynamically
+loadWebComponents() {
+  const components = [
+    { type: 'form-web-component', id: 'form-1' },
+    { type: 'enhanced-form-web-component', id: 'form-2' }
+  ];
+
+  components.forEach(comp => {
+    const element = document.createElement(comp.type);
+    element.id = comp.id;
+    this.container.nativeElement.appendChild(element);
+  });
+}
+This approach provides a robust, scalable solution for Angular-web component communication with proper subscription management and cleanup.
