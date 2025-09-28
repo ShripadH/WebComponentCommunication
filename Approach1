@@ -1,0 +1,89 @@
+The most optimized approach for communication between an Angular shell app and dynamically loaded child web components is to leverage Custom Events for child-to-parent communication and property/method exposure or events for parent-to-child triggers. This method is clean, decoupled, and ideal for runtime scenarios where web components are added and removed dynamically.
+
+Parent Controls Button State
+To disable the submit button until the form in the web component is valid, the child web component should emit a custom event (e.g., formStatusChange) that the parent Angular component listens to.
+
+Web Component Example:
+
+typescript
+// In your web component (file-form.component.ts):
+
+// When form validity changes
+this.dispatchEvent(new CustomEvent('formStatusChange', {
+  detail: { isValid: form.valid }
+}));
+Angular Parent Example:
+
+typescript
+// In Angular template
+<file-form #webComp></file-form>
+<button [disabled]="!formIsValid" (click)="onSubmit()">Submit</button>
+
+// In Angular shell component (app.component.ts)
+formIsValid = false;
+
+ngAfterViewInit() {
+  const webComp = document.querySelector('file-form');
+  // Subscribe to custom events
+  webComp?.addEventListener('formStatusChange', (event: CustomEvent) => {
+    this.formIsValid = event.detail.isValid;
+  });
+  // Store reference if you need to unsubscribe later
+}
+
+ngOnDestroy() {
+  const webComp = document.querySelector('file-form');
+  // Unsubscribe from events when removing the component
+  webComp?.removeEventListener('formStatusChange', ...);
+}
+Parent Requests Form Data
+When submit is clicked, the parent should request form data from the child web component. The web component can expose a method (getFormData) that the parent calls directly, or emit an event carrying the data.
+
+Method Exposure Approach:
+
+typescript
+// In web component:
+public getFormData() {
+  return this.form.value;
+}
+
+// In Angular parent:
+onSubmit() {
+  const webComp: any = document.querySelector('file-form');
+  const formData = webComp?.getFormData();
+  this.myAngularService.processForm(formData);
+}
+Custom Event Approach:
+
+typescript
+// In Angular parent, on submit:
+webComp.dispatchEvent(new CustomEvent('requestFormData'));
+
+// In web component, listen for 'requestFormData' and then:
+this.dispatchEvent(new CustomEvent('formData', {
+  detail: { data: this.form.value }
+}));
+
+// Parent listens for 'formData'
+webComp.addEventListener('formData', (event: CustomEvent) => {
+  this.myAngularService.processForm(event.detail.data);
+});
+Subscribing and Unsubscribing Events
+Since web components are loaded on runtime, always subscribe after attaching the component and unsubscribe before removing it to prevent memory leaks.
+
+Store references to event handlers.
+
+Clean up subscriptions on Angular's ngOnDestroy or component removal.
+
+typescript
+const formStatusHandler = (event: CustomEvent) => { ... };
+webComp.addEventListener('formStatusChange', formStatusHandler);
+
+// Unsubscribe
+webComp.removeEventListener('formStatusChange', formStatusHandler);
+Summary Table
+Requirement	Approach	Angular Implementation	Web Component Implementation
+Disable parent submit if child invalid	Custom Event	Listen for 'formStatusChange'	Emit 'formStatusChange' on valid change
+Get form data on submit	Method / Event	Call getFormData or listen for 'formData'	Expose getFormData/emit event
+Subscribe/Unsubscribe	Manual event attach	Store handler refs, clean up	Regular custom event usage
+This approach leverages the strengths of custom events for decoupled runtime communication and ensures clean management of event subscriptions in a dynamic Angular-Web Component architecture.
